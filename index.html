@@ -810,14 +810,21 @@ function renderDashLoans(){
   }).join('');
 }
 
+function isDashboardVisible(){
+  const v = document.getElementById('view-dashboard');
+  return v && v.classList.contains('active');
+}
+
 function renderDashboard(){
   renderStampRow();
   renderTrendScopeOptions();
-  renderTrendChart();
-  renderCategoryChart();
   renderDashAccounts();
   renderDashLoans();
   renderRecent();
+  if(isDashboardVisible()){
+    renderTrendChart();
+    renderCategoryChart();
+  }
 }
 
 /* ============================ RENDER: ACCOUNTS ============================ */
@@ -948,11 +955,14 @@ function renderTransactions(){
 }
 
 /* ============================ RENDER ALL ============================ */
+function safe(fn){
+  try{ fn(); }catch(e){ console.error('Render error:', e); }
+}
 function renderAll(){
-  renderDashboard();
-  renderAccounts();
-  renderLoans();
-  renderTransactions();
+  safe(renderDashboard);
+  safe(renderAccounts);
+  safe(renderLoans);
+  safe(renderTransactions);
 }
 
 /* ============================ TABS ============================ */
@@ -965,8 +975,8 @@ document.querySelectorAll('[data-goto]').forEach(el=>{
 function switchView(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.view===name));
   document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-'+name));
-  if(name==='dashboard') renderDashboard();
-  if(name==='transactions') renderTransactions();
+  if(name==='dashboard') safe(renderDashboard);
+  if(name==='transactions') safe(renderTransactions);
 }
 
 /* ============================ ACCOUNT MODAL ============================ */
