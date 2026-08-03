@@ -7,6 +7,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
   :root{
     --bg:#0F1A17;
@@ -247,9 +250,51 @@
     transition:opacity .25s, transform .25s;z-index:80;
   }
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+  /* ---------- Auth overlay ---------- */
+  .app{display:none;}
+  #auth-overlay{
+    position:fixed;inset:0;background:var(--bg-2);display:flex;align-items:center;justify-content:center;
+    z-index:100;padding:20px;
+  }
+  .auth-card{
+    width:100%;max-width:380px;background:var(--surface);border:1px solid var(--border);
+    border-radius:12px;padding:28px;
+  }
+  .auth-card .brand{justify-content:center;margin-bottom:22px;}
+  .auth-tabs{display:flex;gap:6px;margin-bottom:18px;border-bottom:1px solid var(--border-soft);}
+  .auth-tab{flex:1;text-align:center;padding:9px;font-size:13px;font-weight:600;color:var(--text-faint);cursor:pointer;border-bottom:2px solid transparent;}
+  .auth-tab.active{color:var(--brass-soft);border-color:var(--brass);}
+  .auth-field{margin-bottom:12px;}
+  .auth-field input{width:100%;}
+  .auth-error{color:var(--clay-soft);font-size:12.5px;margin:-4px 0 12px;min-height:16px;}
+  .auth-submit{width:100%;justify-content:center;padding:11px;}
+  .auth-note{font-size:11.5px;color:var(--text-faint);text-align:center;margin-top:14px;}
 </style>
 </head>
 <body>
+
+<div id="auth-overlay">
+  <div class="auth-card">
+    <div class="brand">
+      <div class="brand-mark">£</div>
+      <div>
+        <h1 style="font-size:22px;">Ledger</h1>
+        <p style="margin:2px 0 0;font-size:12px;color:var(--text-faint);">Your money, kept in order</p>
+      </div>
+    </div>
+    <div class="auth-tabs">
+      <div class="auth-tab active" id="auth-tab-signin">Sign in</div>
+      <div class="auth-tab" id="auth-tab-signup">Create account</div>
+    </div>
+    <div class="auth-field"><label>Email</label><input type="text" id="auth-email" placeholder="you@example.com"></div>
+    <div class="auth-field"><label>Password</label><input type="password" id="auth-password" placeholder="At least 6 characters"></div>
+    <div class="auth-error" id="auth-error"></div>
+    <button class="btn btn-primary auth-submit" id="auth-submit">Sign in</button>
+    <div class="auth-note">Your data is private to this account and syncs across any device you sign in on.</div>
+  </div>
+</div>
+
 <div class="app">
 
   <div class="app-header">
@@ -264,6 +309,7 @@
       <button class="btn" id="btn-add-account">+ Account</button>
       <button class="btn" id="btn-add-loan">+ Loan</button>
       <button class="btn btn-primary" id="btn-add-tx">+ Transaction</button>
+      <button class="btn btn-ghost" id="btn-logout" title="Sign out">Log out</button>
     </div>
   </div>
 
@@ -469,7 +515,22 @@ const DEFAULT_CATEGORIES = {
   expense:["Housing","Utilities","Groceries","Transportation","Dining","Entertainment","Health","Shopping","Education","Loan Payment","Insurance","Other"],
   income:["Salary","Freelance","Investment","Gift","Refund","Other"]
 };
-const STORAGE_KEY = "ledger_finance_data_v1";
+/* ====== FIREBASE CONFIG ======
+   Paste the config object from your Firebase project here.
+   Firebase Console → Project settings → General → Your apps → Web app → SDK setup and configuration
+*/
+const firebaseConfig = {
+    apiKey: "AIzaSyD_DpC4wJNP6jB1fBJjGc5Bo5pGl_LI-Mw",
+  authDomain: "ledger-305d9.firebaseapp.com",
+  projectId: "ledger-305d9",
+  storageBucket: "ledger-305d9.firebasestorage.app",
+  messagingSenderId: "1056120184193",
+  appId: "1:1056120184193:web:995b6963bed647dfca9c80",
+  measurementId: "G-BHBH8VM3FD"
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
 
 let state = { accounts:[], loans:[], transactions:[], categories: structuredClone(DEFAULT_CATEGORIES) };
 let charts = { trend:null, category:null };
@@ -479,19 +540,28 @@ function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 
 async function loadData(){
+  const user = auth.currentUser;
+  if(!user) return;
   try{
-    const res = await window.storage.get(STORAGE_KEY, false);
-    if(res && res.value){
-      const parsed = JSON.parse(res.value);
+    const doc = await db.collection('ledger_users').doc(user.uid).get();
+    if(doc.exists && doc.data().json){
+      const parsed = JSON.parse(doc.data().json);
       state = Object.assign({accounts:[],loans:[],transactions:[],categories:structuredClone(DEFAULT_CATEGORIES)}, parsed);
+    } else {
+      state = { accounts:[], loans:[], transactions:[], categories: structuredClone(DEFAULT_CATEGORIES) };
     }
   }catch(e){
-    // no data yet — keep defaults
+    showToast("Couldn't load your data — check your connection");
   }
 }
 async function saveData(){
+  const user = auth.currentUser;
+  if(!user) return;
   try{
-    await window.storage.set(STORAGE_KEY, JSON.stringify(state), false);
+    await db.collection('ledger_users').doc(user.uid).set({
+      json: JSON.stringify(state),
+      updatedAt: Date.now()
+    });
   }catch(e){
     showToast("Couldn't save — try again");
   }
@@ -1132,11 +1202,72 @@ document.getElementById('trend-scope').addEventListener('change', renderTrendCha
   m.addEventListener('click', (e)=>{ if(e.target===m) m.classList.remove('open'); });
 });
 
-/* ============================ INIT ============================ */
-(async function init(){
-  await loadData();
-  renderAll();
-})();
+/* ============================ AUTH ============================ */
+let authMode = 'signin'; // or 'signup'
+
+document.getElementById('auth-tab-signin').onclick = ()=>{
+  authMode = 'signin';
+  document.getElementById('auth-tab-signin').classList.add('active');
+  document.getElementById('auth-tab-signup').classList.remove('active');
+  document.getElementById('auth-submit').textContent = 'Sign in';
+  document.getElementById('auth-error').textContent = '';
+};
+document.getElementById('auth-tab-signup').onclick = ()=>{
+  authMode = 'signup';
+  document.getElementById('auth-tab-signup').classList.add('active');
+  document.getElementById('auth-tab-signin').classList.remove('active');
+  document.getElementById('auth-submit').textContent = 'Create account';
+  document.getElementById('auth-error').textContent = '';
+};
+
+function friendlyAuthError(code){
+  const map = {
+    'auth/invalid-email':'That email address doesn\'t look right.',
+    'auth/user-not-found':'No account with that email — try Create account instead.',
+    'auth/wrong-password':'Wrong password. Try again.',
+    'auth/email-already-in-use':'An account already exists for that email — try Sign in instead.',
+    'auth/weak-password':'Password needs to be at least 6 characters.',
+    'auth/invalid-credential':'Email or password is incorrect.',
+    'auth/network-request-failed':'Network error — check your connection.'
+  };
+  return map[code] || 'Something went wrong. Please try again.';
+}
+
+document.getElementById('auth-submit').onclick = async ()=>{
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  const errEl = document.getElementById('auth-error');
+  errEl.textContent = '';
+  if(!email || !password){ errEl.textContent = 'Enter both email and password.'; return; }
+  const btn = document.getElementById('auth-submit');
+  btn.disabled = true;
+  try{
+    if(authMode === 'signup'){
+      await auth.createUserWithEmailAndPassword(email, password);
+    } else {
+      await auth.signInWithEmailAndPassword(email, password);
+    }
+    // onAuthStateChanged handles the rest
+  }catch(e){
+    errEl.textContent = friendlyAuthError(e.code);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+document.getElementById('btn-logout').onclick = ()=> auth.signOut();
+
+auth.onAuthStateChanged(async (user)=>{
+  if(user){
+    document.getElementById('auth-overlay').style.display = 'none';
+    document.querySelector('.app').style.display = 'block';
+    await loadData();
+    renderAll();
+  } else {
+    document.getElementById('auth-overlay').style.display = 'flex';
+    document.querySelector('.app').style.display = 'none';
+  }
+});
 </script>
 </body>
 </html>
