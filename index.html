@@ -386,7 +386,7 @@
   <div class="view" id="view-accounts">
     <div class="panel">
       <div class="panel-head">
-        <div><h2>Accounts</h2><div class="panel-sub">Bank, cash, cards — add as many as you need, in any currency</div></div>
+        <div><h2>Accounts</h2><div class="panel-sub" id="accounts-total-sub">Bank, cash, cards — add as many as you need, in any currency</div></div>
         <button class="btn btn-primary btn-sm" id="btn-add-account-2">+ Add account</button>
       </div>
       <div id="accounts-grid" class="card-grid"></div>
@@ -397,7 +397,7 @@
   <div class="view" id="view-loans">
     <div class="panel">
       <div class="panel-head">
-        <div><h2>Loans</h2><div class="panel-sub">Mortgages, car loans, personal loans — track what's left to pay</div></div>
+        <div><h2>Loans</h2><div class="panel-sub" id="loans-total-sub">Mortgages, car loans, personal loans — track what's left to pay</div></div>
         <button class="btn btn-primary btn-sm" id="btn-add-loan-2">+ Add loan</button>
       </div>
       <div id="loans-grid" class="card-grid"></div>
@@ -823,10 +823,17 @@ function renderDashboard(){
 /* ============================ RENDER: ACCOUNTS ============================ */
 function renderAccounts(){
   const grid = document.getElementById('accounts-grid');
+  const sub = document.getElementById('accounts-total-sub');
   if(state.accounts.length===0){
     grid.innerHTML = `<div class="empty" style="grid-column:1/-1;"><h3>No accounts yet</h3><p>Add your bank, cash, or card accounts — as many as you like, in any currency.</p></div>`;
+    sub.textContent = 'Bank, cash, cards — add as many as you need, in any currency';
     return;
   }
+  const groups = currencyGroups();
+  sub.textContent = Object.keys(groups).map(cur=>{
+    const total = groups[cur].reduce((s,a)=>s+accountBalance(a.id),0);
+    return fmt(total,cur);
+  }).join(' · ') + ` total across ${state.accounts.length} account${state.accounts.length>1?'s':''}`;
   grid.innerHTML = state.accounts.map(a=>{
     const bal = accountBalance(a.id);
     return `<div class="item-card">
@@ -846,10 +853,15 @@ function renderAccounts(){
 /* ============================ RENDER: LOANS ============================ */
 function renderLoans(){
   const grid = document.getElementById('loans-grid');
+  const sub = document.getElementById('loans-total-sub');
   if(state.loans.length===0){
     grid.innerHTML = `<div class="empty" style="grid-column:1/-1;"><h3>No loans tracked</h3><p>Add a house loan, car loan, or any other debt to track what's left to pay.</p></div>`;
+    sub.textContent = "Mortgages, car loans, personal loans — track what's left to pay";
     return;
   }
+  const byCur = {};
+  state.loans.forEach(l=>{ byCur[l.currency] = (byCur[l.currency]||0) + l.remaining; });
+  sub.textContent = Object.entries(byCur).map(([cur,total])=>fmt(total,cur)).join(' · ') + ` still owed across ${state.loans.length} loan${state.loans.length>1?'s':''}`;
   grid.innerHTML = state.loans.map(l=>{
     const paidPct = l.principal>0 ? Math.min(100, Math.round((1 - l.remaining/l.principal)*100)) : 0;
     return `<div class="item-card">
