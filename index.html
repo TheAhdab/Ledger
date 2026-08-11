@@ -147,6 +147,7 @@
     content:'';position:absolute;top:-30px;right:-30px;width:100px;height:100px;
     border-radius:50%;border:1px dashed rgba(212,175,55,0.25);
   }
+  .stamp-card-usd{border-color:var(--sage);background:linear-gradient(180deg, rgba(127,161,137,0.08), transparent);}
   .stamp-badge{
     width:34px;height:34px;border-radius:50%;border:1.5px solid var(--brass);
     display:flex;align-items:center;justify-content:center;
@@ -264,6 +265,8 @@
   }
   .type-toggle button.active-income{background:rgba(127,161,137,0.18);border-color:var(--sage);color:var(--sage);}
   .type-toggle button.active-expense{background:rgba(198,96,74,0.18);border-color:var(--clay);color:var(--clay-soft);}
+  .type-toggle button.active-transfer{background:rgba(212,175,55,0.18);border-color:var(--brass);color:var(--brass-soft);}
+  .amt.transfer{color:var(--text-dim);}
 
   .dash-list-row{
     display:flex;align-items:center;justify-content:space-between;gap:10px;
@@ -359,6 +362,13 @@
   <div class="view active" id="view-dashboard">
     <div id="stamp-row" class="stamp-row"></div>
 
+    <div class="panel" id="rates-panel" style="display:none;">
+      <div class="panel-head">
+        <div><h2>Exchange rates</h2><div class="panel-sub">How many units equal 1 USD — used for the combined total above</div></div>
+      </div>
+      <div id="rates-grid" class="filter-row"></div>
+    </div>
+
     <div class="dash-grid">
       <div class="panel">
         <div class="panel-head">
@@ -439,7 +449,7 @@
       <div class="filter-row">
         <div class="filter-field">
           <label>Type</label>
-          <select id="f-type"><option value="all">All</option><option value="income">Income</option><option value="expense">Expense</option></select>
+          <select id="f-type"><option value="all">All</option><option value="income">Income</option><option value="expense">Expense</option><option value="transfer">Transfer</option></select>
         </div>
         <div class="filter-field">
           <label>Account</label>
@@ -536,14 +546,23 @@
   <div class="modal">
     <h3 id="tx-modal-title">Add transaction</h3>
     <input type="hidden" id="tx-id">
+    <input type="hidden" id="tx-transfer-id">
     <div class="form-grid">
       <div class="type-toggle">
         <button type="button" id="tx-type-income">Income</button>
         <button type="button" id="tx-type-expense">Expense</button>
+        <button type="button" id="tx-type-transfer">Transfer</button>
       </div>
-      <div class="form-field"><label>Account</label><select id="tx-account"></select></div>
-      <div class="form-field"><label>Amount</label><input type="number" step="0.01" id="tx-amount" placeholder="0.00"></div>
-      <div class="form-field"><label>Category</label>
+
+      <div class="form-field full" id="tx-field-account"><label>Account</label><select id="tx-account"></select></div>
+
+      <div class="form-field" id="tx-field-from"><label>From account</label><select id="tx-from-account"></select></div>
+      <div class="form-field" id="tx-field-to"><label>To account</label><select id="tx-to-account"></select></div>
+
+      <div class="form-field" id="tx-field-amount"><label id="tx-amount-label">Amount</label><input type="number" step="0.01" id="tx-amount" placeholder="0.00"></div>
+      <div class="form-field" id="tx-field-amount-in" style="display:none;"><label>Amount received</label><input type="number" step="0.01" id="tx-amount-in" placeholder="0.00"></div>
+
+      <div class="form-field full" id="tx-field-category"><label>Category</label>
         <input type="text" id="tx-category" list="category-options" placeholder="e.g. Groceries">
         <datalist id="category-options"></datalist>
       </div>
@@ -584,7 +603,7 @@ firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
 
-let state = { accounts:[], loans:[], transactions:[], categories: structuredClone(DEFAULT_CATEGORIES) };
+let state = { accounts:[], loans:[], transactions:[], categories: structuredClone(DEFAULT_CATEGORIES), rates:{} };
 let charts = { trend:null, category:null };
 let txType = "expense";
 
@@ -598,9 +617,9 @@ async function loadData(){
     const doc = await db.collection('ledger_users').doc(user.uid).get();
     if(doc.exists && doc.data().json){
       const parsed = JSON.parse(doc.data().json);
-      state = Object.assign({accounts:[],loans:[],transactions:[],categories:structuredClone(DEFAULT_CATEGORIES)}, parsed);
+      state = Object.assign({accounts:[],loans:[],transactions:[],categories:structuredClone(DEFAULT_CATEGORIES),rates:{}}, parsed);
     } else {
-      state = { accounts:[], loans:[], transactions:[], categories: structuredClone(DEFAULT_CATEGORIES) };
+      state = { accounts:[], loans:[], transactions:[], categories: structuredClone(DEFAULT_CATEGORIES), rates:{} };
     }
   }catch(e){
     showToast("Couldn't load your data — check your connection");
@@ -635,6 +654,23 @@ function fmt(amount, currency){
     return (currency||'') + ' ' + amount.toFixed(2);
   }
 }
+function txDelta(t){
+  if(t.type==='income') return t.amount;
+  if(t.type==='transfer') return t.direction==='in' ? t.amount : -t.amount;
+  return -t.amount; // expense
+}
+function txDisplayNote(t){
+  if(t.type!=='transfer') return t.note || '';
+  const counter = state.accounts.find(a=>a.id===t.counterAccountId);
+  const base = t.direction==='out' ? `→ ${counter?counter.name:'—'}` : `← ${counter?counter.name:'—'}`;
+  return t.note ? `${base} · ${t.note}` : base;
+}
+function txAmountClass(t){ return t.type==='transfer' ? 'transfer' : t.type; }
+function txAmountSign(t){
+  if(t.type==='income') return '+';
+  if(t.type==='transfer') return t.direction==='in' ? '+' : '-';
+  return '-';
+}
 function accountBalance(accountId, uptoDate){
   const acc = state.accounts.find(a=>a.id===accountId);
   if(!acc) return 0;
@@ -642,7 +678,7 @@ function accountBalance(accountId, uptoDate){
   state.transactions.forEach(t=>{
     if(t.accountId!==accountId) return;
     if(uptoDate && t.date>uptoDate) return;
-    bal += t.type==='income' ? t.amount : -t.amount;
+    bal += txDelta(t);
   });
   return bal;
 }
@@ -662,6 +698,24 @@ function populateSelect(sel, items, placeholder){
   });
 }
 
+function convertToUsd(amount, currency){
+  if(currency==='USD') return amount;
+  const rate = state.rates[currency];
+  if(!rate || rate<=0) return null;
+  return amount / rate;
+}
+function computeUsdTotal(){
+  const groups = currencyGroups();
+  let total = 0;
+  const missing = [];
+  Object.keys(groups).forEach(cur=>{
+    const sum = groups[cur].reduce((s,a)=>s+accountBalance(a.id),0);
+    const usd = convertToUsd(sum, cur);
+    if(usd===null){ missing.push(cur); } else { total += usd; }
+  });
+  return { total, missing };
+}
+
 /* ============================ RENDER: DASHBOARD ============================ */
 function renderStampRow(){
   const row = document.getElementById('stamp-row');
@@ -671,7 +725,17 @@ function renderStampRow(){
     row.innerHTML = `<div class="empty" style="flex:1;"><h3>No accounts yet</h3><p>Add a bank, cash, or card account to see your balances here.</p></div>`;
     return;
   }
-  row.innerHTML = currencies.map(cur=>{
+  let cards = '';
+  const needsUsdCard = currencies.length>1 || (currencies.length===1 && currencies[0]!=='USD');
+  if(needsUsdCard){
+    const { total, missing } = computeUsdTotal();
+    cards += `<div class="stamp-card stamp-card-usd">
+      <div class="stamp-badge" style="border-color:var(--sage);color:var(--sage);">USD</div>
+      <div class="stamp-amount">${fmt(total,'USD')}</div>
+      <div class="stamp-label">Combined total${missing.length ? ' · excludes '+missing.join(', ')+' (set rate below)' : ''}</div>
+    </div>`;
+  }
+  cards += currencies.map(cur=>{
     const total = groups[cur].reduce((s,a)=>s+accountBalance(a.id),0);
     return `<div class="stamp-card">
       <div class="stamp-badge">${cur}</div>
@@ -679,7 +743,31 @@ function renderStampRow(){
       <div class="stamp-label">${groups[cur].length} account${groups[cur].length>1?'s':''}</div>
     </div>`;
   }).join('');
+  row.innerHTML = cards;
 }
+
+function renderRatesPanel(){
+  const panel = document.getElementById('rates-panel');
+  const grid = document.getElementById('rates-grid');
+  const currencies = [...new Set([...state.accounts.map(a=>a.currency), ...state.loans.map(l=>l.currency)])].filter(c=>c!=='USD');
+  if(currencies.length===0){ panel.style.display='none'; return; }
+  panel.style.display='block';
+  grid.innerHTML = currencies.map(cur=>`
+    <div class="filter-field">
+      <label>1 USD = ? ${cur}</label>
+      <input type="number" step="0.0001" min="0" data-rate-currency="${cur}" value="${state.rates[cur] ?? ''}" placeholder="e.g. 15.20" style="width:150px;">
+    </div>
+  `).join('');
+}
+document.getElementById('rates-grid').addEventListener('change', async (e)=>{
+  const input = e.target.closest('[data-rate-currency]');
+  if(!input) return;
+  const cur = input.dataset.rateCurrency;
+  const val = parseFloat(input.value);
+  if(val>0) state.rates[cur] = val; else delete state.rates[cur];
+  await saveData();
+  renderStampRow();
+});
 
 function renderTrendScopeOptions(){
   const sel = document.getElementById('trend-scope');
@@ -707,7 +795,7 @@ function getTrendSeries(scope){
   let running = startBalance;
   const points = [{date:earliestDate, balance:running}];
   txs.forEach(t=>{
-    running += t.type==='income' ? t.amount : -t.amount;
+    running += txDelta(t);
     points.push({date:t.date, balance:running});
   });
   const today = todayStr();
@@ -823,8 +911,8 @@ function renderRecent(){
       <td style="color:var(--text-faint);font-size:12.5px;white-space:nowrap;">${t.date}</td>
       <td>${acc?acc.name:'—'}</td>
       <td><span class="pill">${t.category}</span></td>
-      <td style="color:var(--text-dim);">${t.note||''}</td>
-      <td class="amt ${t.type}">${t.type==='income'?'+':'-'}${fmt(t.amount, acc?acc.currency:'USD')}</td>
+      <td style="color:var(--text-dim);">${txDisplayNote(t)}</td>
+      <td class="amt ${txAmountClass(t)}">${txAmountSign(t)}${fmt(t.amount, acc?acc.currency:'USD')}</td>
     </tr>`;
   }).join('') + `</tbody></table>`;
 }
@@ -866,6 +954,7 @@ function isDashboardVisible(){
 
 function renderDashboard(){
   renderStampRow();
+  renderRatesPanel();
   renderTrendScopeOptions();
   renderDashAccounts();
   renderDashLoans();
@@ -990,8 +1079,8 @@ function renderTransactionRows(){
         <td style="white-space:nowrap;color:var(--text-faint);font-size:12.5px;">${t.date}</td>
         <td>${acc?acc.name:'—'}</td>
         <td><span class="pill">${t.category}</span></td>
-        <td style="color:var(--text-dim);">${t.note||''}</td>
-        <td class="amt ${t.type}">${t.type==='income'?'+':'-'}${fmt(t.amount, acc?acc.currency:'USD')}</td>
+        <td style="color:var(--text-dim);">${txDisplayNote(t)}</td>
+        <td class="amt ${txAmountClass(t)}">${txAmountSign(t)}${fmt(t.amount, acc?acc.currency:'USD')}</td>
         <td><div class="table-actions">
           <button class="icon-btn" data-edit-tx="${t.id}">Edit</button>
           <button class="icon-btn danger" data-del-tx="${t.id}">Delete</button>
@@ -1000,7 +1089,10 @@ function renderTransactionRows(){
     }).join('');
   }
   let income=0, expense=0;
-  rows.forEach(t=> t.type==='income' ? income+=t.amount : expense+=t.amount);
+  rows.forEach(t=>{
+    if(t.type==='income') income+=t.amount;
+    else if(t.type==='expense') expense+=t.amount;
+  });
   document.getElementById('foot-income').textContent = income.toFixed(2);
   document.getElementById('foot-expense').textContent = expense.toFixed(2);
   document.getElementById('foot-net').textContent = (income-expense).toFixed(2);
@@ -1162,7 +1254,10 @@ document.getElementById('loan-save').onclick = async ()=>{
 /* ============================ TRANSACTION MODAL ============================ */
 const modalTx = document.getElementById('modal-tx');
 function refreshTxSelects(){
-  populateSelect(document.getElementById('tx-account'), state.accounts.map(a=>[a.id, a.name+' ('+a.currency+')']));
+  const accOptions = state.accounts.map(a=>[a.id, a.name+' ('+a.currency+')']);
+  populateSelect(document.getElementById('tx-account'), accOptions);
+  populateSelect(document.getElementById('tx-from-account'), accOptions);
+  populateSelect(document.getElementById('tx-to-account'), accOptions);
   const loanSel = document.getElementById('tx-loan');
   populateSelect(loanSel, state.loans.map(l=>[l.id, l.name]));
   loanSel.insertAdjacentHTML('afterbegin', `<option value="">— none —</option>`);
@@ -1173,15 +1268,35 @@ function refreshCategoryOptions(){
   const list = txType==='income' ? state.categories.income : state.categories.expense;
   dl.innerHTML = list.map(c=>`<option value="${c}">`).join('');
 }
+function crossCurrencyTransfer(){
+  const fromAcc = state.accounts.find(a=>a.id===document.getElementById('tx-from-account').value);
+  const toAcc = state.accounts.find(a=>a.id===document.getElementById('tx-to-account').value);
+  return !!(fromAcc && toAcc && fromAcc.currency !== toAcc.currency);
+}
+function updateTransferAmountInVisibility(){
+  const show = txType==='transfer' && crossCurrencyTransfer();
+  document.getElementById('tx-field-amount-in').style.display = show ? 'block' : 'none';
+}
+document.getElementById('tx-from-account').addEventListener('change', updateTransferAmountInVisibility);
+document.getElementById('tx-to-account').addEventListener('change', updateTransferAmountInVisibility);
+
 function setTxType(type){
   txType = type;
   document.getElementById('tx-type-income').classList.toggle('active-income', type==='income');
   document.getElementById('tx-type-expense').classList.toggle('active-expense', type==='expense');
+  document.getElementById('tx-type-transfer').classList.toggle('active-transfer', type==='transfer');
   document.getElementById('tx-loan-field').style.display = type==='expense' ? 'block' : 'none';
+  document.getElementById('tx-field-account').style.display = type==='transfer' ? 'none' : 'block';
+  document.getElementById('tx-field-from').style.display = type==='transfer' ? 'block' : 'none';
+  document.getElementById('tx-field-to').style.display = type==='transfer' ? 'block' : 'none';
+  document.getElementById('tx-field-category').style.display = type==='transfer' ? 'none' : 'block';
+  document.getElementById('tx-amount-label').textContent = type==='transfer' ? 'Amount sent' : 'Amount';
+  updateTransferAmountInVisibility();
   refreshCategoryOptions();
 }
 document.getElementById('tx-type-income').onclick = ()=>setTxType('income');
 document.getElementById('tx-type-expense').onclick = ()=>setTxType('expense');
+document.getElementById('tx-type-transfer').onclick = ()=>setTxType('transfer');
 
 function openTxModal(editId){
   if(state.accounts.length===0){
@@ -1193,17 +1308,32 @@ function openTxModal(editId){
   if(editId){
     const t = state.transactions.find(x=>x.id===editId);
     setTxType(t.type);
-    document.getElementById('tx-id').value = t.id;
-    document.getElementById('tx-account').value = t.accountId;
-    document.getElementById('tx-amount').value = t.amount;
-    document.getElementById('tx-category').value = t.category;
     document.getElementById('tx-date').value = t.date;
     document.getElementById('tx-note').value = t.note || '';
-    document.getElementById('tx-loan').value = t.loanId || '';
+    if(t.type==='transfer'){
+      const legOut = state.transactions.find(x=>x.transferId===t.transferId && x.direction==='out');
+      const legIn = state.transactions.find(x=>x.transferId===t.transferId && x.direction==='in');
+      document.getElementById('tx-id').value = '';
+      document.getElementById('tx-transfer-id').value = t.transferId;
+      document.getElementById('tx-from-account').value = legOut.accountId;
+      document.getElementById('tx-to-account').value = legIn.accountId;
+      document.getElementById('tx-amount').value = legOut.amount;
+      document.getElementById('tx-amount-in').value = legIn.amount;
+      updateTransferAmountInVisibility();
+    } else {
+      document.getElementById('tx-id').value = t.id;
+      document.getElementById('tx-transfer-id').value = '';
+      document.getElementById('tx-account').value = t.accountId;
+      document.getElementById('tx-amount').value = t.amount;
+      document.getElementById('tx-category').value = t.category;
+      document.getElementById('tx-loan').value = t.loanId || '';
+    }
   } else {
     setTxType('expense');
     document.getElementById('tx-id').value = '';
+    document.getElementById('tx-transfer-id').value = '';
     document.getElementById('tx-amount').value = '';
+    document.getElementById('tx-amount-in').value = '';
     document.getElementById('tx-category').value = '';
     document.getElementById('tx-date').value = todayStr();
     document.getElementById('tx-note').value = '';
@@ -1215,43 +1345,70 @@ function closeTxModal(){ modalTx.classList.remove('open'); }
 document.getElementById('btn-add-tx').onclick = ()=>openTxModal(null);
 document.getElementById('tx-cancel').onclick = closeTxModal;
 document.getElementById('tx-save').onclick = async ()=>{
-  const accountId = document.getElementById('tx-account').value;
-  const amount = parseFloat(document.getElementById('tx-amount').value || '0');
-  const category = document.getElementById('tx-category').value.trim() || 'Other';
   const date = document.getElementById('tx-date').value || todayStr();
   const note = document.getElementById('tx-note').value.trim();
-  const loanId = document.getElementById('tx-loan').value || null;
-  if(!accountId){ showToast('Choose an account'); return; }
-  if(!amount || amount<=0){ showToast('Enter an amount greater than 0'); return; }
+  const editId = document.getElementById('tx-id').value;
+  const editTransferId = document.getElementById('tx-transfer-id').value;
 
-  const catList = txType==='income' ? state.categories.income : state.categories.expense;
-  if(!catList.includes(category)) catList.push(category);
+  let newRecords = [];
+  let loanAdjust = null;
 
-  const id = document.getElementById('tx-id').value;
-  const prevTx = id ? state.transactions.find(x=>x.id===id) : null;
+  if(txType==='transfer'){
+    const fromId = document.getElementById('tx-from-account').value;
+    const toId = document.getElementById('tx-to-account').value;
+    const amountOut = parseFloat(document.getElementById('tx-amount').value || '0');
+    const crossCur = crossCurrencyTransfer();
+    const amountIn = crossCur ? parseFloat(document.getElementById('tx-amount-in').value || '0') : amountOut;
 
-  // revert previous loan effect if editing
-  if(prevTx && prevTx.loanId){
-    const l = state.loans.find(x=>x.id===prevTx.loanId);
-    if(l) l.remaining += prevTx.amount;
-  }
+    if(!fromId || !toId){ showToast('Choose both accounts'); return; }
+    if(fromId===toId){ showToast('Pick two different accounts'); return; }
+    if(!amountOut || amountOut<=0){ showToast('Enter an amount greater than 0'); return; }
+    if(crossCur && (!amountIn || amountIn<=0)){ showToast('Enter the amount received'); return; }
 
-  const payload = { accountId, type:txType, amount, category, date, note, loanId };
-  if(id){
-    Object.assign(prevTx, payload);
+    const transferId = uid();
+    newRecords = [
+      { id:uid(), type:'transfer', direction:'out', accountId:fromId, counterAccountId:toId, amount:amountOut, category:'Transfer', date, note, transferId, loanId:null },
+      { id:uid(), type:'transfer', direction:'in', accountId:toId, counterAccountId:fromId, amount:amountIn, category:'Transfer', date, note, transferId, loanId:null }
+    ];
   } else {
-    state.transactions.push(Object.assign({id:uid()}, payload));
+    const accountId = document.getElementById('tx-account').value;
+    const amount = parseFloat(document.getElementById('tx-amount').value || '0');
+    const category = document.getElementById('tx-category').value.trim() || 'Other';
+    const loanId = document.getElementById('tx-loan').value || null;
+    if(!accountId){ showToast('Choose an account'); return; }
+    if(!amount || amount<=0){ showToast('Enter an amount greater than 0'); return; }
+
+    const catList = txType==='income' ? state.categories.income : state.categories.expense;
+    if(!catList.includes(category)) catList.push(category);
+
+    newRecords = [{ id:uid(), accountId, type:txType, amount, category, date, note, loanId, transferId:null, direction:null, counterAccountId:null }];
+    if(loanId) loanAdjust = {loanId, amount};
   }
 
-  if(loanId){
-    const l = state.loans.find(x=>x.id===loanId);
-    if(l) l.remaining = Math.max(0, l.remaining - amount);
+  // validation passed — now clean up whatever this edit is replacing
+  if(editTransferId){
+    state.transactions = state.transactions.filter(x=>x.transferId!==editTransferId);
+  } else if(editId){
+    const prevTx = state.transactions.find(x=>x.id===editId);
+    if(prevTx){
+      if(prevTx.loanId){
+        const l = state.loans.find(x=>x.id===prevTx.loanId);
+        if(l) l.remaining += prevTx.amount;
+      }
+      state.transactions = state.transactions.filter(x=>x.id!==editId);
+    }
+  }
+
+  state.transactions.push(...newRecords);
+  if(loanAdjust){
+    const l = state.loans.find(x=>x.id===loanAdjust.loanId);
+    if(l) l.remaining = Math.max(0, l.remaining - loanAdjust.amount);
   }
 
   await saveData();
   closeTxModal();
   renderAll();
-  showToast('Transaction saved');
+  showToast(txType==='transfer' ? 'Transfer saved' : 'Transaction saved');
 };
 
 /* ============================ RECORD LOAN PAYMENT SHORTCUT ============================ */
@@ -1320,12 +1477,18 @@ document.addEventListener('click', async (e)=>{
     if(delTx.dataset.confirm){
       const id = delTx.dataset.delTx;
       const t = state.transactions.find(x=>x.id===id);
-      if(t && t.loanId){
-        const l = state.loans.find(x=>x.id===t.loanId);
-        if(l) l.remaining += t.amount;
+      if(t){
+        if(t.type==='transfer'){
+          state.transactions = state.transactions.filter(x=>x.transferId!==t.transferId);
+        } else {
+          if(t.loanId){
+            const l = state.loans.find(x=>x.id===t.loanId);
+            if(l) l.remaining += t.amount;
+          }
+          state.transactions = state.transactions.filter(x=>x.id!==id);
+        }
       }
-      state.transactions = state.transactions.filter(x=>x.id!==id);
-      await saveData(); renderAll(); showToast('Transaction deleted');
+      await saveData(); renderAll(); showToast(t && t.type==='transfer' ? 'Transfer deleted' : 'Transaction deleted');
     } else {
       delTx.dataset.confirm = '1'; delTx.textContent = 'Confirm?';
       setTimeout(()=>{ delTx.dataset.confirm=''; delTx.textContent='Delete'; }, 3000);
