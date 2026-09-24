@@ -22,6 +22,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
@@ -369,6 +370,17 @@
       <div id="rates-grid" class="filter-row"></div>
     </div>
 
+    <div class="panel">
+      <div class="panel-head">
+        <div><h2>Backup & restore</h2><div class="panel-sub">Save everything to an Excel file, or restore from one you exported before</div></div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+        <button class="btn btn-primary btn-sm" id="btn-export-excel">⬇ Export to Excel</button>
+        <button class="btn btn-sm" id="btn-import-excel">⬆ Import from Excel</button>
+        <input type="file" id="import-file-input" accept=".xlsx" style="display:none;">
+      </div>
+    </div>
+
     <div class="dash-grid">
       <div class="panel">
         <div class="panel-head">
@@ -573,6 +585,22 @@
     <div class="modal-foot">
       <button class="btn btn-ghost" id="tx-cancel">Cancel</button>
       <button class="btn btn-primary" id="tx-save">Save transaction</button>
+    </div>
+  </div>
+</div>
+
+<!-- IMPORT CONFIRM MODAL -->
+<div class="modal-overlay" id="modal-import">
+  <div class="modal">
+    <h3>Replace your data?</h3>
+    <p style="font-size:13.5px;color:var(--text-dim);line-height:1.6;margin:0 0 16px;">
+      This file contains <strong id="import-summary" style="color:var(--text);"></strong>.
+      Importing will <strong style="color:var(--clay-soft);">replace everything currently saved to your account</strong> — this can't be undone.
+      If you want to keep what you have now, export it first before importing.
+    </p>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="import-cancel">Cancel</button>
+      <button class="btn btn-primary" id="import-confirm">Replace my data</button>
     </div>
   </div>
 </div>
@@ -1584,6 +1612,145 @@ auth.onAuthStateChanged(async (user)=>{
     document.getElementById('auth-overlay').style.display = 'flex';
     document.querySelector('.app').style.display = 'none';
   }
+});
+
+/* ============================ EXCEL EXPORT / IMPORT ============================ */
+function exportToExcel(){
+  if(typeof XLSX === 'undefined'){ showToast("Export library didn't load — check your connection"); return; }
+
+  const wb = XLSX.utils.book_new();
+
+  const accountsSheet = XLSX.utils.json_to_sheet(state.accounts.map(a=>({
+    id:a.id, name:a.name, type:a.type, currency:a.currency, initialBalance:a.initialBalance, createdAt:a.createdAt
+  })));
+  XLSX.utils.book_append_sheet(wb, accountsSheet, 'Accounts');
+
+  const loansSheet = XLSX.utils.json_to_sheet(state.loans.map(l=>({
+    id:l.id, name:l.name, type:l.type, currency:l.currency, principal:l.principal, remaining:l.remaining,
+    payment:l.payment, rate:l.rate, accountId:l.accountId||'', createdAt:l.createdAt||''
+  })));
+  XLSX.utils.book_append_sheet(wb, loansSheet, 'Loans');
+
+  const txSheet = XLSX.utils.json_to_sheet(state.transactions.map(t=>({
+    id:t.id, type:t.type, accountId:t.accountId, direction:t.direction||'', counterAccountId:t.counterAccountId||'',
+    amount:t.amount, category:t.category, date:t.date, note:t.note||'', loanId:t.loanId||'', transferId:t.transferId||''
+  })));
+  XLSX.utils.book_append_sheet(wb, txSheet, 'Transactions');
+
+  const ratesSheet = XLSX.utils.json_to_sheet(
+    Object.entries(state.rates||{}).map(([currency, unitsPerUsd])=>({currency, unitsPerUsd}))
+  );
+  XLSX.utils.book_append_sheet(wb, ratesSheet, 'Rates');
+
+  XLSX.writeFile(wb, `ledger-export-${todayStr()}.xlsx`);
+  showToast('Exported');
+}
+document.getElementById('btn-export-excel').onclick = exportToExcel;
+
+let pendingImport = null;
+
+function handleImportFile(file){
+  if(typeof XLSX === 'undefined'){ showToast("Import library didn't load — check your connection"); return; }
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, {type:'array'});
+      const accSheet = wb.Sheets['Accounts'];
+      const txSheet = wb.Sheets['Transactions'];
+      if(!accSheet || !txSheet){
+        showToast("This doesn't look like a Ledger export — missing Accounts or Transactions sheet");
+        return;
+      }
+      const loanSheet = wb.Sheets['Loans'];
+      const rateSheet = wb.Sheets['Rates'];
+
+      const accRows = XLSX.utils.sheet_to_json(accSheet, {defval:''});
+      const loanRows = loanSheet ? XLSX.utils.sheet_to_json(loanSheet, {defval:''}) : [];
+      const txRows = XLSX.utils.sheet_to_json(txSheet, {defval:''});
+      const rateRows = rateSheet ? XLSX.utils.sheet_to_json(rateSheet, {defval:''}) : [];
+
+      const newAccounts = accRows.filter(r=>r.id || r.name).map(r=>({
+        id: String(r.id || uid()),
+        name: String(r.name || 'Account'),
+        type: String(r.type || 'Bank'),
+        currency: String(r.currency || 'USD').toUpperCase(),
+        initialBalance: parseFloat(r.initialBalance) || 0,
+        createdAt: String(r.createdAt || todayStr())
+      }));
+
+      const newLoans = loanRows.filter(r=>r.id || r.name).map(r=>({
+        id: String(r.id || uid()),
+        name: String(r.name || 'Loan'),
+        type: String(r.type || 'Other'),
+        currency: String(r.currency || 'USD').toUpperCase(),
+        principal: parseFloat(r.principal) || 0,
+        remaining: parseFloat(r.remaining) || 0,
+        payment: parseFloat(r.payment) || 0,
+        rate: parseFloat(r.rate) || 0,
+        accountId: r.accountId ? String(r.accountId) : null,
+        createdAt: String(r.createdAt || todayStr())
+      }));
+
+      const newTx = txRows.filter(r=>r.id || r.accountId).map(r=>({
+        id: String(r.id || uid()),
+        type: String(r.type || 'expense'),
+        accountId: String(r.accountId || ''),
+        direction: r.direction ? String(r.direction) : null,
+        counterAccountId: r.counterAccountId ? String(r.counterAccountId) : null,
+        amount: parseFloat(r.amount) || 0,
+        category: String(r.category || 'Other'),
+        date: String(r.date || todayStr()),
+        note: r.note ? String(r.note) : '',
+        loanId: r.loanId ? String(r.loanId) : null,
+        transferId: r.transferId ? String(r.transferId) : null
+      }));
+
+      const newRates = {};
+      rateRows.forEach(r=>{
+        if(r.currency && r.unitsPerUsd) newRates[String(r.currency).toUpperCase()] = parseFloat(r.unitsPerUsd);
+      });
+
+      const newCategories = structuredClone(DEFAULT_CATEGORIES);
+      newTx.forEach(t=>{
+        if(t.type==='income' && !newCategories.income.includes(t.category)) newCategories.income.push(t.category);
+        if(t.type==='expense' && !newCategories.expense.includes(t.category)) newCategories.expense.push(t.category);
+      });
+
+      pendingImport = { accounts:newAccounts, loans:newLoans, transactions:newTx, rates:newRates, categories:newCategories };
+
+      document.getElementById('import-summary').textContent =
+        `${newAccounts.length} account${newAccounts.length!==1?'s':''}, ${newLoans.length} loan${newLoans.length!==1?'s':''}, ${newTx.length} transaction${newTx.length!==1?'s':''}`;
+      document.getElementById('modal-import').classList.add('open');
+    }catch(err){
+      console.error('Import error:', err);
+      showToast("Couldn't read that file — make sure it's a Ledger Excel export");
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+document.getElementById('btn-import-excel').onclick = ()=> document.getElementById('import-file-input').click();
+document.getElementById('import-file-input').addEventListener('change', (e)=>{
+  const file = e.target.files[0];
+  if(file) handleImportFile(file);
+  e.target.value = '';
+});
+document.getElementById('import-cancel').onclick = ()=>{
+  pendingImport = null;
+  document.getElementById('modal-import').classList.remove('open');
+};
+document.getElementById('import-confirm').onclick = async ()=>{
+  if(!pendingImport) return;
+  state = pendingImport;
+  pendingImport = null;
+  await saveData();
+  document.getElementById('modal-import').classList.remove('open');
+  renderAll();
+  showToast('Data imported');
+};
+document.getElementById('modal-import').addEventListener('click', (e)=>{
+  if(e.target.id==='modal-import'){ pendingImport=null; e.target.classList.remove('open'); }
 });
 </script>
 </body>
